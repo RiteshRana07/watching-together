@@ -83,9 +83,20 @@ export async function GET() {
     });
   } catch (error) {
     console.error("[storage upload-link] ERROR:", error);
+    // error.status here is often pCloud's own HTTP transport status (which
+    // is frequently 200 even for an API-level failure like "Log in
+    // required" — pCloud encodes the real error in the JSON `result`
+    // field, not the HTTP status). Blindly reusing that as OUR status
+    // meant this route could return HTTP 200 with an error body, which
+    // fetch()'s `.ok` check reads as success — silently hiding the
+    // failure from the client entirely. Only reuse it if it's already a
+    // genuine HTTP error code; otherwise this is a real server error.
+    const upstreamStatus = Number(error?.status);
+    const status =
+      upstreamStatus >= 400 && upstreamStatus <= 599 ? upstreamStatus : 500;
     return NextResponse.json(
       { error: error?.message || "Couldn't create an upload link." },
-      { status: Number(error?.status) || 500 }
+      { status }
     );
   }
 }

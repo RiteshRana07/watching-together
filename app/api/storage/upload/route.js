@@ -351,12 +351,14 @@ export async function POST(
       title,
     });
   } catch (error) {
-    return jsonError(
-      error,
-      Number(
-        error?.status
-      ) || 500
-    );
+    // Same fix as /api/storage/upload-link: pCloud's own transport status
+    // (error.status) is often 200 even for an API-level failure, so it
+    // must never be blindly reused as our outgoing status — only if it's
+    // already a genuine HTTP error code.
+    const upstreamStatus = Number(error?.status);
+    const status =
+      upstreamStatus >= 400 && upstreamStatus <= 599 ? upstreamStatus : 500;
+    return jsonError(error, status);
   }
 }
 
