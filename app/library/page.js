@@ -57,6 +57,16 @@ async function uploadDirectToPCloud(file, onProgress) {
   if (!linkRes.ok) {
     throw new Error(linkData.error || "Couldn't get an upload link.");
   }
+  // Fail loudly and specifically here instead of silently building a
+  // broken "undefined?code=undefined" URL that ends up hitting this
+  // app's own domain (a 404) rather than pCloud. This makes the real
+  // problem visible immediately instead of needing another round of
+  // screenshots to diagnose.
+  if (!linkData.uploadUrl || !linkData.code) {
+    throw new Error(
+      `Upload link response was incomplete: ${JSON.stringify(linkData)}`
+    );
+  }
 
   const formData = new FormData();
   formData.append("file", file, file.name);
@@ -636,6 +646,7 @@ export default function LibraryPage() {
        * back to routing through this server if that fails.
        */
       let result;
+      let directErrForDisplay = null;
       try {
         result = await uploadDirectToPCloud(file, (uploaded) => {
           setProgressBytes(uploaded);
@@ -645,15 +656,25 @@ export default function LibraryPage() {
           "[library] direct-to-pCloud upload failed, falling back to server proxy:",
           directErr
         );
-        result = await uploadToPCloud(
-          file,
-          title.trim(),
-          (uploaded) => {
-            setProgressBytes(
-              uploaded
-            );
-          }
-        );
+        directErrForDisplay = directErr;
+        try {
+          result = await uploadToPCloud(
+            file,
+            title.trim(),
+            (uploaded) => {
+              setProgressBytes(
+                uploaded
+              );
+            }
+          );
+        } catch (fallbackErr) {
+          // Surface BOTH reasons — the fallback's own error alone (e.g. a
+          // generic 413) hides the actually useful diagnostic info about
+          // why the direct path failed in the first place.
+          throw new Error(
+            `Direct upload failed: ${directErrForDisplay.message} — Fallback also failed: ${fallbackErr.message}`
+          );
+        }
       }
 
       console.log(
