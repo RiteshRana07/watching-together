@@ -1,52 +1,146 @@
 import { NextResponse } from "next/server";
 
-// pCloud sends the user back here with ?code=... after they approve access.
-// We exchange that code for a permanent access token server-side (using
-// the client secret, which never touches the browser) and show it back to
-// the person doing setup, once, so they can copy it into
-// PCLOUD_ACCESS_TOKEN (and PCLOUD_API_HOST) in their environment variables
-// and redeploy. There's nowhere safer to persist it automatically without
-// adding a secrets-management system, so this is a manual last step.
-export async function GET(req) {
-  const url = new URL(req.url);
-  const code = url.searchParams.get("code");
-  const clientId = process.env.PCLOUD_CLIENT_ID;
-  const clientSecret = process.env.PCLOUD_CLIENT_SECRET;
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
 
-  if (!code) {
-    return new Response("Missing ?code from pCloud — start over at /api/pcloud/authorize", {
-      status: 400,
-    });
-  }
-  if (!clientId || !clientSecret) {
-    return new Response("PCLOUD_CLIENT_ID / PCLOUD_CLIENT_SECRET aren't set.", { status: 500 });
-  }
+  const code = searchParams.get("code");
+  const error = searchParams.get("error");
 
-  // pCloud accounts live on one of two regional API hosts; the token
-  // exchange response tells us which one this account uses.
-  const tokenRes = await fetch(
-    `https://api.pcloud.com/oauth2_token?client_id=${clientId}&client_secret=${clientSecret}&code=${code}`
-  );
-  const tokenData = await tokenRes.json();
-
-  if (tokenData.result !== 0 || !tokenData.access_token) {
-    return new Response(
-      `pCloud token exchange failed: ${tokenData.error || JSON.stringify(tokenData)}`,
+  if (error) {
+    return new NextResponse(
+      `pCloud authorization failed: ${error}`,
       { status: 400 }
     );
   }
 
-  const apiHost = tokenData.hostname || "api.pcloud.com";
+  if (!code) {
+    return new NextResponse(
+      "Missing pCloud authorization code.",
+      { status: 400 }
+    );
+  }
 
-  return new Response(
-    `<!DOCTYPE html>
-<html><body style="font-family: monospace; background: #111; color: #eee; padding: 40px; line-height: 1.6;">
-<h2>pCloud connected ✅</h2>
-<p>Copy these into your Vercel project's Environment Variables, then redeploy:</p>
-<pre style="background:#000; padding:16px; border-radius:8px; white-space:pre-wrap;">PCLOUD_ACCESS_TOKEN=${tokenData.access_token}
-PCLOUD_API_HOST=${apiHost}</pre>
-<p style="color:#f88;">This token grants full access to this pCloud account — treat it like a password. Don't share this page or commit the token to source control.</p>
-</body></html>`,
-    { headers: { "Content-Type": "text/html" } }
-  );
+  const clientId = process.env.PCLOUD_CLIENT_ID;
+  const clientSecret = process.env.PCLOUD_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    return new NextResponse(
+      "Missing PCLOUD_CLIENT_ID or PCLOUD_CLIENT_SECRET in .env.local",
+      { status: 500 }
+    );
+  }
+
+  try {
+    const tokenUrl = new URL(
+      "https://api.pcloud.com/oauth2_token"
+    );
+
+    tokenUrl.searchParams.set("client_id", clientId);
+    tokenUrl.searchParams.set("client_secret", clientSecret);
+    tokenUrl.searchParams.set("code", code);
+
+    const response = await fetch(tokenUrl.toString(), {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || data.result !== 0) {
+      return new NextResponse(
+        `pCloud token exchange failed: ${
+          data.error || JSON.stringify(data)
+        }`,
+        { status: 400 }
+      );
+    }
+
+    /*
+     * IMPORTANT:
+     * Do not expose the access token in the browser.
+     *
+     * For this setup we display it once so you can copy it
+     * into .env.local. Remove this route or change the response
+     * after setup is complete.
+     */
+
+    return new NextResponse(
+      `
+      <html>
+        <head>
+          <title>pCloud Authorization Successful</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              padding: 40px;
+              background: #111;
+              color: white;
+            }
+
+            .box {
+              max-width: 800px;
+              margin: auto;
+              padding: 30px;
+              background: #222;
+              border-radius: 12px;
+            }
+
+            code {
+              display: block;
+              padding: 15px;
+              margin-top: 10px;
+              background: #000;
+              border-radius: 8px;
+              word-break: break-all;
+            }
+
+            .success {
+              color: #4ade80;
+            }
+
+            .warning {
+              color: #fbbf24;
+            }
+          </style>
+        </head>
+
+        <body>
+          <div class="box">
+            <h1 class="success">
+              ✓ pCloud Authorization Successful
+            </h1>
+
+            <p>Your pCloud application has been authorized.</p>
+
+            <h3>Access Token</h3>
+
+            <code>${data.auth}</code>
+
+            <p class="warning">
+              Copy this token into your .env.local file.
+              Do not share it with anyone.
+            </p>
+
+            <p>
+              After saving the token, restart your Next.js server.
+            </p>
+          </div>
+        </body>
+      </html>
+      `,
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html",
+        },
+      }
+    );
+  } catch (err) {
+    console.error("pCloud OAuth error:", err);
+
+    return new NextResponse(
+      `Internal OAuth error: ${err.message}`,
+      { status: 500 }
+    );
+  }
 }
