@@ -1,77 +1,88 @@
 "use client";
-import { useEffect, useState } from "react";
 
-export default function Queue({ code, channel, isHost }) {
-  const [queue, setQueue] = useState([]);
-  const [busy, setBusy] = useState(false);
-
-  async function loadQueue() {
-    try {
-      const res = await fetch(`/api/rooms/${code}/queue`, { cache: "no-store" });
-      const data = await res.json();
-      if (res.ok) setQueue(data.queue || []);
-    } catch {}
-  }
-
-  useEffect(() => {
-    loadQueue();
-    if (!channel) return;
-    const refresh = () => loadQueue();
-    channel.bind("room:queue-changed", refresh);
-    return () => channel.unbind("room:queue-changed", refresh);
-  }, [code, channel]);
-
-  async function playNext() {
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/rooms/${code}/queue/next`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) alert(data.error || "Couldn't play the next video");
-      else await loadQueue();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeItem(id) {
-    await fetch(`/api/rooms/${code}/queue?id=${encodeURIComponent(id)}`, { method: "DELETE" });
-    loadQueue();
-  }
-
-  if (!queue.length && !isHost) return null;
-
+export default function Queue({
+  queue,
+  isHost,
+  canControl,
+  originalTitle,
+  isOnOriginal,
+  onPlayOriginal,
+  onPlayItem,
+  onRemove,
+}) {
   return (
-    <div className="mt-4 rounded-xl bg-neutral-900 border border-neutral-800 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <h2 className="text-sm font-semibold">Up next</h2>
-          <p className="text-xs text-neutral-500">The original room video stays fixed; queued videos play after it.</p>
-        </div>
-        {isHost && queue.length > 0 && (
+    <div className="rounded-xl bg-neutral-900 border border-neutral-800 p-4 space-y-3">
+      {/* The room's original video is always available to jump back to —
+          it's never removed, just temporarily replaced by whatever's
+          playing from the queue. */}
+      <div className="flex items-center justify-between text-xs bg-neutral-950 rounded-lg px-3 py-2">
+        <span className="truncate">
+          🎬 <span className="font-medium">{originalTitle || "Main video"}</span>
+          {isOnOriginal && (
+            <span className="ml-2 text-[10px] uppercase tracking-wide bg-accent/20 text-accent px-1.5 py-0.5 rounded-full">
+              Now playing
+            </span>
+          )}
+        </span>
+        {canControl && !isOnOriginal && (
           <button
-            onClick={playNext}
-            disabled={busy}
-            className="text-xs px-3 py-1.5 rounded-lg bg-accent font-medium disabled:opacity-50"
+            onClick={onPlayOriginal}
+            className="text-accent hover:underline ml-2 shrink-0"
           >
-            {busy ? "Starting..." : "▶ Play next"}
+            ▶️ Play main video
           </button>
         )}
       </div>
 
-      {queue.length === 0 ? (
-        <p className="text-xs text-neutral-600">No videos queued yet.</p>
-      ) : (
-        <div className="space-y-2">
-          {queue.map((item, index) => (
-            <div key={item.id} className="flex items-center gap-3 rounded-lg bg-neutral-950 px-3 py-2">
-              <span className="text-xs text-neutral-600 w-4">{index + 1}</span>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm truncate">{item.video_title || item.playable_video_url || item.video_url}</p>
-                <p className="text-[11px] text-neutral-600">added by {item.added_by_username || "viewer"}</p>
-              </div>
-              <button onClick={() => removeItem(item.id)} className="text-xs text-neutral-600 hover:text-red-400">Remove</button>
-            </div>
-          ))}
+      {queue && queue.length > 0 && (
+        <div>
+          <p className="text-xs font-medium text-neutral-400 mb-2">
+            Up next <span className="text-neutral-600">({queue.length})</span>
+          </p>
+          <div className="space-y-1.5">
+            {queue.map((item) => {
+              const playing = !isOnOriginal && item.currentlyPlaying;
+              return (
+                <div
+                  key={item.id}
+                  className="flex items-center justify-between text-xs bg-neutral-950 rounded-lg px-3 py-2"
+                >
+                  <span className="truncate">
+                    {item.video_title || item.video_url}
+                    {item.added_by && (
+                      <span className="text-neutral-600"> · added by {item.added_by}</span>
+                    )}
+                    {playing && (
+                      <span className="ml-2 text-[10px] uppercase tracking-wide bg-accent/20 text-accent px-1.5 py-0.5 rounded-full">
+                        Now playing
+                      </span>
+                    )}
+                  </span>
+                  <span className="flex items-center gap-2 ml-2 shrink-0">
+                    {/* Playback (play a queued video) is a host-or-co-host
+                        action. Removing from the queue stays host-only —
+                        it's a bit more "administrative" than playback. */}
+                    {canControl && !playing && (
+                      <button
+                        onClick={() => onPlayItem(item.id)}
+                        className="text-accent hover:underline"
+                      >
+                        ▶️ Play
+                      </button>
+                    )}
+                    {isHost && (
+                      <button
+                        onClick={() => onRemove(item.id)}
+                        className="text-neutral-600 hover:text-red-400"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

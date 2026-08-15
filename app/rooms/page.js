@@ -81,8 +81,8 @@ export default function RoomsPage() {
                   >
                     <Link href={`/room/${r.code}`} className="flex-1">
                       <p className="font-medium">{r.name}</p>
-                      {(r.original_video_title || r.video_title) && (
-                        <p className="text-xs text-neutral-500">{r.original_video_title || r.video_title}</p>
+                      {r.video_title && (
+                        <p className="text-xs text-neutral-500">{r.video_title}</p>
                       )}
                     </Link>
                     <div className="flex items-center gap-3">
