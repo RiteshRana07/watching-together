@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-const { extractYouTubeId } = require("../lib/youtube");
+import VoiceChat from "./VoiceChat";
+const { extractYouTubeId, isDirectVideoUrl } = require("../lib/youtube");
 
 const EMOJIS = ["❤️", "😂", "😮", "👏", "🔥"];
 const URL_PATTERN = /(https?:\/\/[^\s]+)/i;
@@ -15,11 +16,39 @@ export default function Chat({
   controllers,
   onGrantControl,
   onAddToQueue,
+  initialMessages,
+  queuedUrls,
+  canModerateVoice,
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [showParticipants, setShowParticipants] = useState(false);
+  // Auto-expanded for the host so co-host management is discoverable
+  // without needing to know to click "show list" first.
+  const [showParticipants, setShowParticipants] = useState(!!isHost);
   const endRef = useRef(null);
+  const seededHistory = useRef(false);
+
+  // Hosts get their persisted chat history seeded in once it arrives (see
+  // the room page — only the host fetches this). Guests never get this;
+  // they only see messages sent live during their own visit.
+  //
+  // Deduped against messages already showing (matched by username+text):
+  // a message you sent yourself is shown instantly from the optimistic
+  // local add, and if the history fetch resolves shortly after, it would
+  // otherwise show that exact same message a second time.
+  useEffect(() => {
+    if (!initialMessages || initialMessages.length === 0 || seededHistory.current) return;
+    seededHistory.current = true;
+    setMessages((prev) => {
+      const alreadyShown = new Set(
+        prev.filter((m) => m.type === "message").map((m) => `${m.username}\u0000${m.message}`)
+      );
+      const toPrepend = initialMessages
+        .filter((m) => !alreadyShown.has(`${m.username}\u0000${m.message}`))
+        .map((m) => ({ type: "message", ...m }));
+      return [...toPrepend, ...prev];
+    });
+  }, [initialMessages]);
 
   useEffect(() => {
     if (!channel) return;
@@ -120,6 +149,15 @@ export default function Chat({
         </div>
       )}
 
+      <VoiceChat
+        channel={channel}
+        broadcast={broadcast}
+        userId={userId}
+        username={username}
+        participants={participants}
+        canModerate={canModerateVoice}
+      />
+
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2 text-sm">
         {messages.map((m, i) => {
           if (m.type === "system") {
@@ -132,6 +170,11 @@ export default function Chat({
 
           const urlMatch = m.message.match(URL_PATTERN);
           const youtubeId = urlMatch ? extractYouTubeId(urlMatch[1]) : null;
+          // "Add to queue" also shows for a plain direct video link (e.g.
+          // a .mp4 link from a video download site) — not just YouTube.
+          const isQueueable = urlMatch && (youtubeId || isDirectVideoUrl(urlMatch[1]));
+          const queueKey = youtubeId || urlMatch?.[1];
+          const alreadyQueued = isQueueable && queuedUrls?.has(queueKey);
 
           return (
             <div key={i}>
@@ -139,13 +182,19 @@ export default function Chat({
                 <span className="text-accent font-medium">{m.username}: </span>
                 <span className="text-neutral-200">{m.message}</span>
               </p>
-              {youtubeId && (
-                <button
-                  onClick={() => onAddToQueue?.(urlMatch[1])}
-                  className="mt-1 text-xs px-2.5 py-1 rounded-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300"
-                >
-                  ➕ Add to queue
-                </button>
+              {isQueueable && (
+                alreadyQueued ? (
+                  <span className="mt-1 inline-block text-xs px-2.5 py-1 rounded-full bg-neutral-800/50 text-neutral-500">
+                    ✓ In queue
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => onAddToQueue?.(urlMatch[1])}
+                    className="mt-1 text-xs px-2.5 py-1 rounded-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300"
+                  >
+                    ➕ Add to queue
+                  </button>
+                )
               )}
             </div>
           );
