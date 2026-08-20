@@ -1,398 +1,124 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 
+const { verifyToken } = require("../../../../lib/auth");
 const {
-  verifyToken,
-} = require("../../../../lib/auth");
-
-const {
-  getOrCreateUserFolder,
-  uploadFileToFolder,
-  storageRef,
+  getUploadLinkCode,
+  getUploadLinkUrl,
   validateVideo,
   MAX_VIDEO_BYTES,
 } = require("../../../../lib/pcloud");
 
-const {
-  createStorageUpload,
-  deleteStorageUpload,
-} = require("../../../../lib/db");
-
 export const runtime = "nodejs";
-
-/* =========================================================
-   AUTH
-========================================================= */
+export const dynamic = "force-dynamic";
 
 function getCurrentUser() {
   try {
-    const token =
-      cookies().get(
-        "wt_session"
-      )?.value;
-
-    if (!token) {
-      return null;
-    }
-
-    const payload =
-      verifyToken(token);
-
-    if (
-      !payload?.userId
-    ) {
-      return null;
-    }
-
-    return payload;
-  } catch (error) {
-    console.error(
-      "[storage upload] auth error:",
-      error
-    );
-
+    const token = cookies().get("wt_session")?.value;
+    const payload = token ? verifyToken(token) : null;
+    return payload?.userId ? payload : null;
+  } catch {
     return null;
   }
 }
 
-/* =========================================================
-   ERROR
-========================================================= */
-
-function jsonError(
-  error,
-  status = 400
-) {
-  console.error(
-    "[storage upload] ERROR:",
-    error
-  );
-
+function jsonError(error, status = 400) {
+  console.error("[storage upload]", error);
   return NextResponse.json(
-    {
-      error:
-        error?.message ||
-        "Storage operation failed.",
-    },
-    {
-      status,
-    }
+    { error: error?.message || "Storage operation failed." },
+    { status }
   );
 }
 
-/* =========================================================
-   POST
-========================================================= */
-
-export async function POST(
-  request
-) {
-  const user =
-    getCurrentUser();
-
-  console.log(
-    "[storage upload] user:",
-    {
-      userId:
-        user?.userId ||
-        null,
-
-      username:
-        user?.username ||
-        null,
-    }
-  );
+/*
+ * IMPORTANT:
+ * The video bytes are NOT accepted by this Next.js route.
+ *
+ * The route only prepares a direct pCloud Upload Link request.
+ * This avoids sending multi-GB videos through Railway/Next.js.
+ */
+export async function POST(request) {
+  const user = getCurrentUser();
 
   if (!user) {
     return NextResponse.json(
-      {
-        error:
-          "Not signed in.",
-      },
-      {
-        status: 401,
-      }
+      { error: "Not signed in." },
+      { status: 401 }
     );
   }
 
   try {
-    /*
-     * Browser sends:
-     *
-     * FormData
-     *   title
-     *   file
-     */
+    const body = await request.json();
 
-    const formData =
-      await request.formData();
+    const title = String(body?.title || "").trim();
+    const filename = String(body?.filename || "video.mp4").trim();
+    const contentType = String(body?.contentType || "").trim();
+    const size = Number(body?.size);
 
-    const title =
-      String(
-        formData.get(
-          "title"
-        ) || ""
-      ).trim();
-
-    const uploaded =
-      formData.get(
-        "file"
-      );
-
-    if (
-      !title
-    ) {
+    if (!title) {
       return NextResponse.json(
-        {
-          error:
-            "Movie title is required.",
-        },
-        {
-          status: 400,
-        }
+        { error: "Movie title is required." },
+        { status: 400 }
       );
     }
 
-    if (
-      !uploaded ||
-      typeof uploaded !==
-        "object" ||
-      typeof uploaded.arrayBuffer !==
-        "function"
-    ) {
+    validateVideo({ filename, contentType, size });
+
+    if (size > MAX_VIDEO_BYTES) {
       return NextResponse.json(
-        {
-          error:
-            "Video file is required.",
-        },
-        {
-          status: 400,
-        }
+        { error: "Video is too large. Maximum size is 3 GB." },
+        { status: 400 }
       );
     }
 
-    const filename =
-      String(
-        uploaded.name ||
-          "video.mp4"
-      );
-
-    const contentType =
-      String(
-        uploaded.type ||
-          ""
-      );
-
-    const size =
-      Number(
-        uploaded.size
-      );
+    const code = getUploadLinkCode();
 
     /*
-     * Validate video.
+     * Unique name lets the server identify this upload after
+     * pCloud's public Upload Link has received it.
      */
-    validateVideo({
-      filename,
-      contentType,
-      size,
-    });
+    const crypto = require("crypto");
+    const base = filename
+      .normalize("NFKC")
+      .replace(/[\\/\0]+/g, "-")
+      .replace(/[^a-zA-Z0-9._ -]+/g, "-")
+      .replace(/\s+/g, " ")
+      .replace(/-+/g, "-")
+      .trim()
+      .replace(/^[. -]+|[. -]+$/g, "")
+      .slice(0, 150) || "video.mp4";
 
-    // This route is now the FALLBACK path only (used when the direct
-    // browser-to-pCloud upload in app/library/page.js fails). It's still
-    // a Vercel serverless function, so anything routed through it is
-    // subject to the platform's ~4.5MB request body limit regardless of
-    // validateVideo's much larger 3GB business-logic limit above. Fail
-    // clearly here rather than letting a larger file hit Vercel's own
-    // generic platform-level rejection.
-    const FALLBACK_MAX_BYTES = 4 * 1024 * 1024;
-    if (size > FALLBACK_MAX_BYTES) {
-      return NextResponse.json(
-        {
-          error:
-            "This file is too large for the fallback upload path (the direct-to-pCloud upload failed first, likely a network or CORS issue). Files over ~4MB need the direct path working.",
-        },
-        { status: 413 }
-      );
-    }
-
-    /*
-     * =====================================================
-     * STEP 1
-     *
-     * Find/create:
-     *
-     * /WatchTogether
-     *
-     * then:
-     *
-     * /WatchTogether/<username>
-     *
-     * =====================================================
-     */
-
-    const userFolder =
-      await getOrCreateUserFolder(
-        user.userId,
-        user.username
-      );
-
-    console.log(
-      "[storage upload] user folder:",
-      userFolder
-    );
-
-    /*
-     * =====================================================
-     * STEP 2
-     *
-     * Upload directly into THIS user's folder.
-     * =====================================================
-     */
-
-    const upload =
-      await uploadFileToFolder({
-        folderId:
-          userFolder.folderId,
-
-        file:
-          uploaded,
-
-        filename,
-
-        contentType,
-      });
-
-    /*
-     * =====================================================
-     * STEP 3
-     *
-     * Permanent storage reference.
-     * =====================================================
-     */
-
-    const storageRefValue =
-      upload.storageRef ||
-      storageRef(
-        upload.fileId
-      );
-
-    /*
-     * =====================================================
-     * STEP 4
-     *
-     * Store a temporary DB upload record only if
-     * your existing DB expects it.
-     *
-     * This is intentionally protected because the
-     * database schema may differ between versions.
-     * =====================================================
-     */
-
-    console.log(
-      "[storage upload] SUCCESS:",
-      {
-        userId:
-          user.userId,
-
-        username:
-          user.username,
-
-        folderId:
-          userFolder.folderId,
-
-        folderName:
-          userFolder.folderName,
-
-        fileId:
-          upload.fileId,
-
-        storageRef:
-          storageRefValue,
-
-        filename:
-          upload.metadata?.name ||
-          filename,
-
-        size:
-          upload.metadata?.size ||
-          size,
-      }
-    );
+    const objectName = `${String(user.userId).slice(0, 40)}-${Date.now()}-${crypto.randomUUID()}-${base}`;
 
     return NextResponse.json({
       ok: true,
-
-      storageRef:
-        storageRefValue,
-
-      fileId:
-        upload.fileId,
-
-      folderId:
-        userFolder.folderId,
-
-      folderName:
-        userFolder.folderName,
-
-      size:
-        Number(
-          upload.metadata?.size ||
-            size
-        ),
-
-      contentType:
-        upload.metadata?.contenttype ||
-        contentType,
-
-      name:
-        upload.metadata?.name ||
-        filename,
-
-      title,
+      uploadUrl: getUploadLinkUrl(user.username || `user-${user.userId}`),
+      uploadLinkCode: code,
+      objectName,
+      filename: objectName,
+      size,
+      contentType,
     });
   } catch (error) {
-    // Same fix as /api/storage/upload-link: pCloud's own transport status
-    // (error.status) is often 200 even for an API-level failure, so it
-    // must never be blindly reused as our outgoing status — only if it's
-    // already a genuine HTTP error code.
-    const upstreamStatus = Number(error?.status);
-    const status =
-      upstreamStatus >= 400 && upstreamStatus <= 599 ? upstreamStatus : 500;
-    return jsonError(error, status);
+    return jsonError(error, 500);
   }
 }
 
-/* =========================================================
-   GET
-========================================================= */
-
 export async function GET() {
-  const user =
-    getCurrentUser();
+  const user = getCurrentUser();
 
   if (!user) {
     return NextResponse.json(
-      {
-        error:
-          "Not signed in.",
-      },
-      {
-        status: 401,
-      }
+      { error: "Not signed in." },
+      { status: 401 }
     );
   }
 
   return NextResponse.json({
     ok: true,
-
-    message:
-      "Storage upload API is working.",
-
-    userId:
-      user.userId,
-
-    username:
-      user.username ||
-      null,
+    message: "Storage upload API is working.",
+    mode: "direct-pcloud-upload-link",
+    userId: user.userId,
+    username: user.username || null,
   });
 }

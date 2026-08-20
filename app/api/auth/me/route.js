@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 const { verifyToken } = require("../../../../lib/auth");
 const { getUserById } = require("../../../../lib/db");
+const { isSuperHostEmail } = require("../../../../lib/superhost");
 
 export async function GET() {
   const token = cookies().get("wt_session")?.value;
@@ -9,5 +10,9 @@ export async function GET() {
   if (!payload) return NextResponse.json({ user: null });
 
   const user = await getUserById(payload.userId);
-  return NextResponse.json({ user: user || null });
+  if (!user) return NextResponse.json({ user: null });
+
+  return NextResponse.json({
+    user: { ...user, isSuperHost: isSuperHostEmail(user.email) },
+  });
 }

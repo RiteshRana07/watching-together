@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 const { verifyToken } = require("../../../../../../lib/auth");
-const { playNextRoomQueueItem } = require("../../../../../../lib/db");
+const { playNextRoomQueueItem, getUserById } = require("../../../../../../lib/db");
 const { isPCloudRef, signDownload } = require("../../../../../../lib/pcloud");
 const pusher = require("../../../../../../lib/pusher");
 
@@ -11,7 +11,8 @@ export async function POST(req, { params }) {
   if (!user) return NextResponse.json({ error: "Not signed in" }, { status: 401 });
 
   const code = params.code.toUpperCase();
-  const result = await playNextRoomQueueItem(code, user.userId);
+  const dbUser = await getUserById(user.userId);
+  const result = await playNextRoomQueueItem(code, user.userId, dbUser?.email);
   if (result.error) return NextResponse.json({ error: result.error }, { status: 400 });
 
   const room = result.room;

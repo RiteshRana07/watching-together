@@ -1,109 +1,111 @@
-# pCloud upload setup for WatchTogether
+# WatchTogether + pCloud upload setup
 
-This version no longer calls pCloud's `createuploadlink` API. Your account was returning pCloud error `1000` from that API even though normal authenticated pCloud APIs and `uploadfile` work.
+This deployment uses a **pCloud Upload Link / File Request** so large video files are uploaded directly from the browser to pCloud.
 
-Instead, the app uses a **pCloud File Request** created once in the pCloud web UI. The browser uploads directly to pCloud through that request, so large videos do not pass through the Next.js/Vercel server.
+That is important for both Vercel and Railway: the Next.js server never receives the multi-GB video body.
 
-## 1. Create the destination folder
+## 1. Create the pCloud destination folder
 
-In pCloud, create/use:
+Create or use:
 
 `/WatchTogether`
 
-You already have this folder.
+The application server can create this folder automatically for normal authenticated pCloud operations, but the Upload Link must point to this folder.
 
-## 2. Create a File Request
+## 2. Create a pCloud Upload Link / File Request
 
-1. Open pCloud web.
-2. Open the `/WatchTogether` folder.
-3. Open the folder's three-dot menu.
-4. Choose **Request files**.
-5. Create the request.
-6. Keep the request active.
-7. If pCloud lets you set an upload limit or file limit, set it high enough for your intended use and storage quota.
+In pCloud web:
 
-pCloud calls these **File Requests**. They are designed for receiving files directly into a selected folder and do not require the uploader to have a pCloud account.
+1. Open `/WatchTogether`.
+2. Open the folder menu.
+3. Choose **Request files** / **File Request** (the exact label can vary).
+4. Create the request.
+5. Keep it active.
+6. Make sure its storage/file limits are sufficient for your intended uploads.
 
-## 3. Copy the request URL or code
+pCloud's API documents upload links and the unauthenticated `uploadtolink` endpoint. The upload-link code is the value used by the application.
 
-The generated link normally looks like a pCloud request URL containing a `code` value. You can paste either:
+## 3. Configure environment variables
 
-- the raw request code, or
-- the complete File Request URL
-
-into `PCLOUD_UPLOAD_LINK_CODE`.
-
-## 4. Configure `.env.local`
-
-Copy `.env.example` to `.env.local` if needed and set:
+Set these on Railway:
 
 ```env
+JWT_SECRET=use-a-long-random-secret
+
+DATABASE_URL=<Railway PostgreSQL connection string>
+
 PCLOUD_API_HOST=https://api.pcloud.com
-PCLOUD_ACCESS_TOKEN=your_existing_pcloud_access_token
+PCLOUD_ACCESS_TOKEN=<your server-side pCloud OAuth/access token>
 PCLOUD_FOLDER=/WatchTogether
-PCLOUD_FOLDER_ID=your_watchtogether_folder_id
-PCLOUD_UPLOAD_LINK_CODE=paste_the_file_request_code_or_full_url_here
+PCLOUD_UPLOAD_LINK_CODE=<pCloud upload-link code or full upload-link URL>
+
+PUSHER_APP_ID=<your Pusher app id>
+PUSHER_KEY=<your Pusher key>
+PUSHER_SECRET=<your Pusher secret>
+PUSHER_CLUSTER=<your Pusher cluster>
+NEXT_PUBLIC_PUSHER_KEY=<your Pusher key>
+NEXT_PUBLIC_PUSHER_CLUSTER=<your Pusher cluster>
 ```
 
-Do not commit `.env.local` or expose `PCLOUD_ACCESS_TOKEN` to the browser.
+Use `https://eapi.pcloud.com` instead if your pCloud account belongs to pCloud's European data center. pCloud documents separate US and European API hosts.
 
-## 5. Database
+**Never put `PCLOUD_ACCESS_TOKEN` in a `NEXT_PUBLIC_*` variable.**
 
-On the next application request, the app automatically migrates `storage_uploads.uploadlink_id` to allow NULL. No manual SQL migration command is required.
-
-## 6. Start the application
-
-```powershell
-npm install
-npm run dev
-```
-
-Then open the Library page, choose a video, enter its title, and click **Add to library**.
-
-## 7. Upload flow
+## 4. Upload flow in the Railway version
 
 ```text
 Browser
-  |
-  | POST /api/storage/upload (init metadata only)
-  v
-Next.js
-  |
-  | returns the pCloud File Request upload URL
-  v
-Browser --------------------> pCloud File Request
-        direct video upload
-                 |
-                 v
-          /WatchTogether
-                 |
-                 v
-        browser upload progress
-                 |
-                 v
-          finalize + fileid
-                 |
-                 v
-           PostgreSQL movie
+   |
+   | 1. POST metadata only
+   v
+Railway / Next.js
+   |
+   | returns pCloud upload URL + unique filename
+   v
+Browser
+   |
+   | 2. DIRECT multipart upload
+   v
+pCloud Upload Link
+   |
+   | file stored temporarily in /WatchTogether
+   v
+Browser
+   |
+   | 3. POST completion metadata
+   v
+Railway / Next.js
+   |
+   | find unique file + move it
+   v
+/WatchTogether/<username>/<original filename>
+   |
+   v
+PostgreSQL stores pcloud:<fileid>
 ```
 
-The video itself is not sent through the Next.js API route. This is important for Vercel deployments because Vercel Functions have a 4.5 MB request-body limit; direct client-to-storage uploads avoid that serverless request path.
+The server does not buffer the video and does not use Railway's local filesystem for video storage.
 
-## 8. Progress display
+pCloud's `uploadtolink` endpoint accepts the upload-link code and multipart file upload, while `renamefile` can move a file into another folder.
 
-The Library page uses the browser's `XMLHttpRequest.upload.onprogress` event while the video is being sent directly to pCloud. It displays:
+## 5. Maximum file size
 
-`X.X MB / Y.Y MB (percent%)`
+The application keeps the existing **3 GB application limit**.
 
-The app does **not** call pCloud's `uploadlinkprogress` endpoint for File Request uploads, avoiding the `1900 Upload not found` error seen with that endpoint in this setup.
+The actual usable limit is also constrained by your pCloud storage/quota and the limits configured on the Upload Link.
 
+## 6. Playback
 
-## 9. Important limitation
+The database stores only a stable pCloud file reference:
 
-The File Request is shared infrastructure for this application. Every upload is placed into `/WatchTogether`, and the app uses a unique generated object name for each upload so concurrent users do not overwrite each other's files.
+`pcloud:<fileid>`
 
-If you delete or expire the File Request in pCloud, uploads will stop until you create another request and update `PCLOUD_UPLOAD_LINK_CODE`.
+When a video is played, the server uses pCloud's server-side `getfilelink` API and returns a temporary content URL to the browser.
 
+pCloud explicitly documents `getfilelink` as a server-side method and says it cannot be called directly from a web application, which is why the WatchTogether server performs this operation.
 
-## Important: File Request progress
-The app uses the browser's XMLHttpRequest upload progress events for MB/MB progress. It does not call pCloud's `uploadlinkprogress` endpoint, because that endpoint can return error 1900 for File Request uploads. The File Request URL/code is used only for `uploadtolink`.
+## 7. Important
+
+If the pCloud Upload Link/File Request is deleted, expired, or reaches its configured file/space limit, new uploads will fail. pCloud documents these upload-link failure conditions.
+
+The `PCLOUD_UPLOAD_LINK_CODE` value can be either the raw code or the full pCloud upload-link URL; WatchTogether extracts the code automatically.

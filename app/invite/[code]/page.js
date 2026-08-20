@@ -65,8 +65,8 @@ export default function InvitePage({ params }) {
             WatchTogether invitation
           </p>
           <h1 className="text-2xl font-bold mb-1">{room.name}</h1>
-          {room.video_title && (
-            <p className="text-sm text-neutral-400 mb-4">{room.video_title}</p>
+          {(room.original_video_title || room.video_title) && (
+            <p className="text-sm text-neutral-400 mb-4">{room.original_video_title || room.video_title}</p>
           )}
 
           <div className="flex items-center justify-center gap-3 text-xs text-neutral-500 mb-6">

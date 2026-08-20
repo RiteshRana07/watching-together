@@ -1,10 +1,14 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import VoiceChat from "./VoiceChat";
-const { extractYouTubeId, isDirectVideoUrl } = require("../lib/youtube");
+const { extractYouTubeId } = require("../lib/youtube");
 
 const EMOJIS = ["❤️", "😂", "😮", "👏", "🔥"];
 const URL_PATTERN = /(https?:\/\/[^\s]+)/i;
+
+function timeNow() {
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 export default function Chat({
   channel,
@@ -13,29 +17,23 @@ export default function Chat({
   userId,
   participants,
   isHost,
+  isSuperHost,
   controllers,
   onGrantControl,
   onAddToQueue,
   initialMessages,
-  queuedUrls,
-  canModerateVoice,
 }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  // Auto-expanded for the host so co-host management is discoverable
-  // without needing to know to click "show list" first.
-  const [showParticipants, setShowParticipants] = useState(!!isHost);
+  const [panelOpen, setPanelOpen] = useState(false);
   const endRef = useRef(null);
   const seededHistory = useRef(false);
+  const closeTimer = useRef(null);
 
-  // Hosts get their persisted chat history seeded in once it arrives (see
-  // the room page — only the host fetches this). Guests never get this;
-  // they only see messages sent live during their own visit.
-  //
-  // Deduped against messages already showing (matched by username+text):
-  // a message you sent yourself is shown instantly from the optimistic
-  // local add, and if the history fetch resolves shortly after, it would
-  // otherwise show that exact same message a second time.
+  // Host (or the super-host) gets their persisted chat history seeded in
+  // once it arrives. Deduped against messages already on screen (matched
+  // by username+text) so a message you just sent yourself doesn't show
+  // twice if the history fetch resolves right after you send it.
   useEffect(() => {
     if (!initialMessages || initialMessages.length === 0 || seededHistory.current) return;
     seededHistory.current = true;
@@ -55,8 +53,6 @@ export default function Chat({
 
     function onMessage(m) {
       setMessages((prev) => {
-        // If this is our own message coming back over the wire, we've
-        // already shown it optimistically — skip the duplicate.
         if (m.clientId && prev.some((x) => x.clientId === m.clientId)) return prev;
         return [...prev, { type: "message", ...m }];
       });
@@ -64,13 +60,13 @@ export default function Chat({
     function onMemberAdded(member) {
       setMessages((prev) => [
         ...prev,
-        { type: "system", text: `${member.info.username} joined the room`, at: Date.now() },
+        { type: "system", text: `${member.info.username} joined the room · ${timeNow()}`, at: Date.now() },
       ]);
     }
     function onMemberRemoved(member) {
       setMessages((prev) => [
         ...prev,
-        { type: "system", text: `${member.info.username} left the room`, at: Date.now() },
+        { type: "system", text: `${member.info.username} left the room · ${timeNow()}`, at: Date.now() },
       ]);
     }
 
@@ -97,66 +93,87 @@ export default function Chat({
     const clientId = Math.random().toString(36).slice(2);
     const payload = { message: text, username, clientId };
 
-    // Show it immediately for the sender rather than waiting on a round
-    // trip through Pusher — the channel echo (if it arrives) is deduped above.
     setMessages((prev) => [...prev, { type: "message", ...payload }]);
     broadcast("chat:message", payload);
     setInput("");
   }
 
+  // Small hover delay so moving the mouse from the trigger into the panel
+  // doesn't immediately close it.
+  function openPanel() {
+    clearTimeout(closeTimer.current);
+    setPanelOpen(true);
+  }
+  function scheduleClose() {
+    closeTimer.current = setTimeout(() => setPanelOpen(false), 200);
+  }
+
+  const canModerate = !!(isHost || isSuperHost);
+
   return (
     <div className="flex flex-col h-full bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-      <button
-        onClick={() => setShowParticipants((s) => !s)}
-        className="px-4 py-3 border-b border-neutral-800 text-sm text-neutral-400 text-left hover:bg-neutral-850"
+      {/* Hover to reveal participants + host/co-host management + voice
+          chat, instead of them permanently taking up vertical space. */}
+      <div
+        className="relative border-b border-neutral-800"
+        onMouseEnter={openPanel}
+        onMouseLeave={scheduleClose}
       >
-        {participants.length} watching
-        {participants.length > 0 && (
-          <span className="text-neutral-600"> · {showParticipants ? "hide" : "show"} list</span>
-        )}
-      </button>
-
-      {showParticipants && (
-        <div className="px-4 py-2 border-b border-neutral-800 space-y-1.5 max-h-40 overflow-y-auto">
-          {participants.map((p) => {
-            const canControl = p.isHost || controllers?.has(p.id);
-            return (
-              <div key={p.id} className="flex items-center justify-between text-xs">
-                <span className="flex items-center gap-1.5">
-                  {p.username}
-                  {p.isHost && (
-                    <span className="text-[9px] uppercase bg-accent/20 text-accent px-1.5 py-0.5 rounded-full">
-                      Host
-                    </span>
-                  )}
-                  {!p.isHost && canControl && (
-                    <span className="text-[9px] uppercase bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded-full">
-                      Co-host
-                    </span>
-                  )}
-                </span>
-                {isHost && !p.isHost && p.id !== userId && (
-                  <button
-                    onClick={() => onGrantControl?.(p.id, !canControl)}
-                    className="text-accent hover:underline"
-                  >
-                    {canControl ? "Remove co-host" : "Make co-host"}
-                  </button>
-                )}
-              </div>
-            );
-          })}
+        <div className="px-4 py-3 text-sm text-neutral-400 cursor-default">
+          {participants.length} watching
+          <span className="text-neutral-600"> · hover for details</span>
         </div>
-      )}
 
-      <VoiceChat
-        channel={channel}
-        broadcast={broadcast}
-        userId={userId}
-        username={username}
-        participants={participants}
-        canModerate={canModerateVoice}
-      />
+        {panelOpen && (
+          <div className="absolute right-0 top-full z-20 w-80 bg-neutral-900 border border-neutral-800 rounded-lg shadow-2xl shadow-black/60 max-h-[70vh] overflow-y-auto">
+            <div className="px-4 py-2 space-y-1.5 border-b border-neutral-800">
+              <p className="text-xs font-medium text-neutral-500 mb-1">Participants</p>
+              {participants.map((p) => {
+                const isCoHost = p.isHost || p.isSuperHost || controllers?.has(p.id);
+                return (
+                  <div key={p.id} className="flex items-center justify-between text-xs">
+                    <span className="flex items-center gap-1.5">
+                      {p.username}
+                      {p.isHost && (
+                        <span className="text-[9px] uppercase bg-accent/20 text-accent px-1.5 py-0.5 rounded-full">
+                          Host
+                        </span>
+                      )}
+                      {p.isSuperHost && !p.isHost && (
+                        <span className="text-[9px] uppercase bg-fuchsia-500/20 text-fuchsia-300 px-1.5 py-0.5 rounded-full">
+                          Admin
+                        </span>
+                      )}
+                      {!p.isHost && !p.isSuperHost && isCoHost && (
+                        <span className="text-[9px] uppercase bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded-full">
+                          Co-host
+                        </span>
+                      )}
+                    </span>
+                    {canModerate && !p.isHost && !p.isSuperHost && p.id !== userId && (
+                      <button
+                        onClick={() => onGrantControl?.(p.id, !isCoHost)}
+                        className="text-accent hover:underline"
+                      >
+                        {isCoHost ? "Remove co-host" : "Make co-host"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <VoiceChat
+              channel={channel}
+              broadcast={broadcast}
+              userId={userId}
+              username={username}
+              participants={participants}
+              canModerate={canModerate}
+            />
+          </div>
+        )}
+      </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2 text-sm">
         {messages.map((m, i) => {
@@ -170,11 +187,6 @@ export default function Chat({
 
           const urlMatch = m.message.match(URL_PATTERN);
           const youtubeId = urlMatch ? extractYouTubeId(urlMatch[1]) : null;
-          // "Add to queue" also shows for a plain direct video link (e.g.
-          // a .mp4 link from a video download site) — not just YouTube.
-          const isQueueable = urlMatch && (youtubeId || isDirectVideoUrl(urlMatch[1]));
-          const queueKey = youtubeId || urlMatch?.[1];
-          const alreadyQueued = isQueueable && queuedUrls?.has(queueKey);
 
           return (
             <div key={i}>
@@ -182,19 +194,13 @@ export default function Chat({
                 <span className="text-accent font-medium">{m.username}: </span>
                 <span className="text-neutral-200">{m.message}</span>
               </p>
-              {isQueueable && (
-                alreadyQueued ? (
-                  <span className="mt-1 inline-block text-xs px-2.5 py-1 rounded-full bg-neutral-800/50 text-neutral-500">
-                    ✓ In queue
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => onAddToQueue?.(urlMatch[1])}
-                    className="mt-1 text-xs px-2.5 py-1 rounded-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300"
-                  >
-                    ➕ Add to queue
-                  </button>
-                )
+              {youtubeId && (
+                <button
+                  onClick={() => onAddToQueue?.(urlMatch[1])}
+                  className="mt-1 text-xs px-2.5 py-1 rounded-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300"
+                >
+                  ➕ Add to queue
+                </button>
               )}
             </div>
           );

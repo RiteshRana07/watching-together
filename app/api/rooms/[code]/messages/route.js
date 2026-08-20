@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-const { getRoomByCode, getMessages } = require("../../../../../lib/db");
+const { getRoomByCode, getUserById, getMessages } = require("../../../../../lib/db");
 const { verifyToken } = require("../../../../../lib/auth");
+const { isSuperHostEmail } = require("../../../../../lib/superhost");
 
-// Only the host gets persisted chat history. Non-host participants only see
-// messages sent live during their current visit (see components/Chat.js) —
-// this route intentionally isn't used for them. Messages are deleted along
-// with the room (room_messages has ON DELETE CASCADE on room_id).
+// Only the room's host, or the site-wide super-host account, gets
+// persisted chat history back. Everyone else only sees messages sent
+// live during their own visit (see components/Chat.js) — this route
+// intentionally isn't used for them. Messages are deleted along with the
+// room (room_messages has ON DELETE CASCADE on room_id).
 export async function GET(req, { params }) {
   const token = cookies().get("wt_session")?.value;
   const payload = token && verifyToken(token);
@@ -14,7 +16,10 @@ export async function GET(req, { params }) {
 
   const room = await getRoomByCode(params.code.toUpperCase());
   if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
-  if (room.host_id !== payload.userId) {
+
+  const user = await getUserById(payload.userId);
+  const allowed = room.host_id === payload.userId || isSuperHostEmail(user?.email);
+  if (!allowed) {
     return NextResponse.json({ error: "Only the host can view chat history" }, { status: 403 });
   }
 

@@ -4,10 +4,11 @@ const pusher = require("../../../../../lib/pusher");
 const { verifyToken } = require("../../../../../lib/auth");
 const {
   getRoomByCode,
+  getUserById,
   saveMessage,
   addCoHost,
   removeCoHost,
-  isHostOrCoHost,
+  canManageRoom,
 } = require("../../../../../lib/db");
 
 const ALLOWED_EVENTS = [
@@ -18,9 +19,9 @@ const ALLOWED_EVENTS = [
   "reaction:show",
   "room:grant-control",
   // Voice chat signaling (WebRTC offer/answer/ICE relay) + mute controls.
-  // Offer/answer/ice-candidate payloads include a targetUserId; each
-  // client ignores anything not addressed to it (Pusher has no built-in
-  // per-client targeting on a shared presence channel).
+  // Offer/answer/ice-candidate payloads carry a targetUserId; each client
+  // ignores anything not addressed to it — Pusher has no built-in
+  // per-client targeting on a shared presence channel.
   "voice:join",
   "voice:leave",
   "voice:offer",
@@ -32,7 +33,7 @@ const ALLOWED_EVENTS = [
 ];
 
 // Events where the sender already applied their own change locally and
-// doesn't need to receive an echo of their own action.
+// doesn't need an echo of their own action.
 const EXCLUDE_SENDER_EVENTS = [
   "player:action",
   "player:heartbeat",
@@ -48,11 +49,15 @@ const EXCLUDE_SENDER_EVENTS = [
   "voice:request-unmute",
 ];
 
-// Events that need the room's host_id (for authorization) and/or a
-// database write as a side effect of broadcasting them.
 const NEEDS_ROOM_LOOKUP = new Set([
   "room:grant-control",
   "chat:message",
+  "voice:force-mute",
+  "voice:request-unmute",
+]);
+
+const NEEDS_MANAGE_CHECK = new Set([
+  "room:grant-control",
   "voice:force-mute",
   "voice:request-unmute",
 ]);
@@ -67,33 +72,30 @@ export async function POST(req, { params }) {
 
   const room = NEEDS_ROOM_LOOKUP.has(event) ? await getRoomByCode(code) : null;
 
-  if (event === "room:grant-control") {
-    // Only the room's host may grant or revoke someone's co-host status —
-    // a co-host can't grant control to a third person.
+  if (NEEDS_MANAGE_CHECK.has(event)) {
+    // Host, co-host, or the site-wide super-host may grant/revoke co-host
+    // status and moderate voice chat. A plain co-host can also mute
+    // others / request unmutes — only granting co-host itself stays
+    // stricter (see below), matching "co-host can do playback + voice
+    // moderation, only the real host/super-host manages who's co-host."
     const token = cookies().get("wt_session")?.value;
     const authPayload = token && verifyToken(token);
-    if (!authPayload || !room || authPayload.userId !== room.host_id) {
-      return NextResponse.json({ error: "Only the host can do that" }, { status: 403 });
+    if (!authPayload || !room) {
+      return NextResponse.json({ error: "Not signed in" }, { status: 401 });
     }
-    // Persisted (not just broadcast) so co-host status survives a refresh
-    // and so the server can authorize co-host actions like playing a
-    // queued video — see /api/rooms/[code]/queue/[itemId]/play.
-    try {
-      if (data.grant) await addCoHost(room.id, data.userId);
-      else await removeCoHost(room.id, data.userId);
-    } catch (err) {
-      console.error("Failed to persist co-host change:", err);
-    }
-  }
-
-  if (event === "voice:force-mute" || event === "voice:request-unmute") {
-    // Only the host or a co-host may mute someone else or ask them to
-    // unmute. Nobody can remotely turn someone else's mic ON without that
-    // person acting themselves — see components/VoiceChat.js.
-    const token = cookies().get("wt_session")?.value;
-    const authPayload = token && verifyToken(token);
-    if (!authPayload || !room || !(await isHostOrCoHost(room, authPayload.userId))) {
+    const authUser = await getUserById(authPayload.userId);
+    const allowed = await canManageRoom(room, authPayload.userId, authUser?.email);
+    if (!allowed) {
       return NextResponse.json({ error: "Only the host or a co-host can do that" }, { status: 403 });
+    }
+
+    if (event === "room:grant-control") {
+      try {
+        if (data.grant) await addCoHost(room.id, data.userId);
+        else await removeCoHost(room.id, data.userId);
+      } catch (err) {
+        console.error("Failed to persist co-host change:", err);
+      }
     }
   }
 
@@ -102,14 +104,13 @@ export async function POST(req, { params }) {
       ? { ...data, message: String(data.message || "").slice(0, 500) }
       : data;
 
-  // Persist chat messages so the host can see everything that was said
-  // even while they were away — see /api/rooms/[code]/messages. Guests
-  // don't get this history back (they only see what's sent live during
-  // their own visit), but the message is still saved either way since the
-  // host needs to see messages guests sent while the host was offline.
-  // Awaited (not fire-and-forget) because a serverless function can be
-  // frozen the instant it returns a response, which would silently drop
-  // an un-awaited write.
+  // Persist chat so the host (and super-host) can see everything said
+  // even while away — see /api/rooms/[code]/messages. Guests don't get
+  // this history back (only what's sent live during their own visit),
+  // but the message is saved regardless since the host needs to see
+  // messages sent while they were offline. Awaited, not fire-and-forget —
+  // a serverless function can be frozen the instant it responds, which
+  // would silently drop an un-awaited write.
   if (event === "chat:message" && room) {
     try {
       await saveMessage({
